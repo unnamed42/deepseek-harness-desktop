@@ -183,7 +183,7 @@ void MainWindow::onBackendFailed(const QString &detail)
         m_splashStatus->setText(detail);
     if (m_splashError) {
         m_splashError->setText(
-            tr("后端未能就绪。请确认 Node.js 与 Harness 运行时可用，"
+            tr("后端未能就绪。请确认已安装 deepseek-harness-git（提供 dsh 命令），"
                "详见日志 %1，或先手动运行 “dsh web”。")
                 .arg(m_backend->backendLogPath()));
         m_splashError->show();

@@ -2,15 +2,15 @@
 # Contributor: szy
 
 pkgname=deepseek-harness-bin-desktop
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Desktop wrapper (Qt6 WebEngine) for the DeepSeek Harness browser UI, with a bundled dsh web runtime (0.1.0-rc.6) - no browser needed"
+pkgdesc="Desktop wrapper (Qt6 WebEngine) for the DeepSeek Harness browser UI - uses the deepseek-harness-git dsh backend via a systemd user service, no browser needed"
 arch=('x86_64')
 url="https://github.com/PlayerSZY/deepseek-harness-desktop"
 license=('MIT')
-depends=('qt6-webengine' 'nodejs' 'hicolor-icon-theme')
+depends=('qt6-webengine' 'deepseek-harness-git' 'hicolor-icon-theme')
 source=("https://github.com/PlayerSZY/deepseek-harness-desktop/releases/download/v${pkgver}/deepseek-harness-bin-desktop-${pkgver}-x86_64.tar.zst")
-sha256sums=('7d9569b2357d8f846241effea67d97c4b828f0838d25c4d9068411dacced8a0f')
+sha256sums=('a741783d98719239d3d67b9d410c57e4cfd82781b46a979189699dd7b8386f0f')
 
 package() {
   cd "$srcdir/deepseek-harness-desktop-${pkgver}"
@@ -22,8 +22,10 @@ package() {
   ln -s ../lib/deepseek-harness-desktop/bin/deepseek-harness-desktop \
     "$pkgdir/usr/bin/deepseek-harness-desktop"
 
-  # Bundled dsh web runtime (node_modules)
-  cp -a --no-preserve=ownership runtime "$pkgdir/usr/lib/deepseek-harness-desktop/runtime"
+  # systemd user service for the dsh web backend (the wrapper enables it on
+  # first run only when no equivalent service exists yet)
+  install -Dm644 systemd/dsh-web.service \
+    "$pkgdir/usr/lib/systemd/user/dsh-web.service"
 
   # Desktop entry
   install -Dm644 share/applications/deepseek-harness-desktop.desktop \

@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek Harness web backend (dsh web)
+Documentation=https://github.com/deepseek-ai/deepseek-harness
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=DSH_WEB_PORT=3080
+ExecStart=/usr/bin/dsh web --host 127.0.0.1 --port ${DSH_WEB_PORT}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

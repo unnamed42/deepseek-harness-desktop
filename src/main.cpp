@@ -67,23 +67,19 @@ int main(int argc, char *argv[])
     const QCommandLineOption urlOption(QStringLiteral("url"),
                                        QStringLiteral("直接加载指定 URL，不自动探测/启动后端"),
                                        QStringLiteral("url"));
-    const QCommandLineOption runtimeOption(QStringLiteral("runtime"),
-                                           QStringLiteral("Harness 运行时目录（含 node_modules）"),
-                                           QStringLiteral("dir"));
-    const QCommandLineOption nodeOption(QStringLiteral("node"),
-                                        QStringLiteral("node 可执行文件路径"),
-                                        QStringLiteral("path"));
+    const QCommandLineOption noServiceOption(
+        QStringLiteral("no-service"),
+        QStringLiteral("不启用/启动 systemd 用户服务，始终直接运行 dsh web"));
     parser.addOption(portOption);
     parser.addOption(urlOption);
-    parser.addOption(runtimeOption);
-    parser.addOption(nodeOption);
+    parser.addOption(noServiceOption);
     parser.process(app);
 
     BackendManager backend;
     backend.preferredPort = parser.value(portOption);
     backend.directUrl = parser.value(urlOption);
-    backend.runtimeOverride = parser.value(runtimeOption);
-    backend.nodeOverride = parser.value(nodeOption);
+    backend.noService = parser.isSet(noServiceOption)
+        || !qEnvironmentVariableIsEmpty("DSH_DESKTOP_NO_SERVICE");
 
     MainWindow window(&backend);
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &backend,

@@ -13,50 +13,50 @@
 #include <QStandardPaths>
 
 namespace {
-constexpr int kProbeTimeoutMs = 2500;   // per-request transfer timeout
-constexpr int kPollIntervalMs = 300;    // readiness poll interval
+constexpr int kProbeTimeoutMs = 2500;    // per-request transfer timeout
+constexpr int kPollIntervalMs = 300;     // readiness poll interval
 constexpr int kUrlLineTimeoutMs = 20000; // wait for the printed URL line
-constexpr int kReadyPollAttempts = 300;  // ~90 s while our backend boots
+constexpr int kReadyPollAttempts = 300;  // ~90 s while a spawned backend boots
+constexpr int kServicePollAttempts = 200; // ~60 s for a systemd-managed backend
 constexpr int kDirectPollAttempts = 1200; // ~6 min for a user-managed URL
+constexpr int kSystemctlTimeoutMs = 30000;
 
 const char *kProbeExisting = "probe-existing";
 const char *kReadyPoll = "ready-poll";
+const char *kServiceUnit = "dsh-web.service";
 
-QString dshEntryIn(const QString &dir)
+struct SysResult
 {
-    if (dir.isEmpty())
+    int exitCode = -1;
+    QString output;
+};
+
+SysResult runSystemctl(const QStringList &arguments)
+{
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(QStringLiteral("systemctl"),
+                  QStringList{QStringLiteral("--user")} + arguments);
+    if (!process.waitForStarted(3000))
         return {};
-    const QString entry = dir + QStringLiteral("/node_modules/@deepseek-ai/dsh/lib/bin.js");
-    return QFileInfo::exists(entry) ? entry : QString();
-}
-
-QString detectRuntimeDir()
-{
-    const QStringList candidates = {
-        qEnvironmentVariable("DSH_DESKTOP_RUNTIME_DIR"),
-        QCoreApplication::applicationDirPath() + QStringLiteral("/runtime"),
-        QCoreApplication::applicationDirPath() + QStringLiteral("/../runtime"),
-        QCoreApplication::applicationDirPath()
-            + QStringLiteral("/../../lib/deepseek-harness-desktop/runtime"),
-        QStringLiteral("/usr/lib/deepseek-harness-desktop/runtime"),
-        QStringLiteral("/usr/local/lib/deepseek-harness-desktop/runtime"),
-        QStringLiteral("/opt/deepseek-harness-desktop/runtime"),
-    };
-    for (const QString &candidate : candidates) {
-        if (!dshEntryIn(candidate).isEmpty())
-            return QDir(candidate).absolutePath();
+    if (!process.waitForFinished(kSystemctlTimeoutMs)) {
+        process.kill();
+        process.waitForFinished(2000);
+        return {};
     }
-    return {};
+    return {process.exitCode(), QString::fromUtf8(process.readAllStandardOutput())};
 }
 
-QString nodeExecutable(const QString &overridePath)
+QString dshExecutable()
 {
-    if (!overridePath.isEmpty() && QFileInfo(overridePath).isExecutable())
-        return overridePath;
-    const QString envPath = qEnvironmentVariable("DSH_DESKTOP_NODE");
-    if (!envPath.isEmpty() && QFileInfo(envPath).isExecutable())
-        return envPath;
-    return QStandardPaths::findExecutable(QStringLiteral("node"));
+    return QStandardPaths::findExecutable(QStringLiteral("dsh"));
+}
+
+QString userUnitDir()
+{
+    const QString configHome = qEnvironmentVariable(
+        "XDG_CONFIG_HOME", QDir::home().filePath(QStringLiteral(".config")));
+    return configHome + QStringLiteral("/systemd/user");
 }
 } // namespace
 
@@ -94,7 +94,11 @@ void BackendManager::appendLog(const QByteArray &chunk)
 
 void BackendManager::start()
 {
-    m_runtimeDir = detectRuntimeDir();
+    if (!qEnvironmentVariableIsEmpty("DSH_DESKTOP_DEBUG")) {
+        connect(this, &BackendManager::statusChanged, this, [this](const QString &message) {
+            appendLog(QByteArray("[status] ") + message.toUtf8() + QByteArray("\n"));
+        });
+    }
     appendLog(QByteArray("\n==== ")
               + QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8()
               + QByteArray(" launch ====\n"));
@@ -153,7 +157,10 @@ void BackendManager::onProbeFinished(QNetworkReply *reply)
             }
             // Some unrelated service owns that port; never hijack it.
         }
-        spawnBackend();
+        if (noService)
+            spawnBackend();
+        else
+            tryServiceOrSpawn(reply->url().port());
     } else if (kind == QLatin1String(kReadyPoll)) {
         if (reply->error() == QNetworkReply::NoError && status == 200) {
             m_ready = true;
@@ -165,37 +172,218 @@ void BackendManager::onProbeFinished(QNetworkReply *reply)
     }
 }
 
+// --- systemd user service management -------------------------------------
+
+bool BackendManager::unitFileExists(const QString &name)
+{
+    const QStringList candidates = {
+        userUnitDir() + QLatin1Char('/') + name,
+        QStringLiteral("/etc/systemd/user/") + name,
+        QStringLiteral("/usr/lib/systemd/user/") + name,
+        QStringLiteral("/usr/local/lib/systemd/user/") + name,
+    };
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(candidate))
+            return true;
+    }
+    return false;
+}
+
+BackendManager::ServiceInfo BackendManager::detectEquivalentService()
+{
+    ServiceInfo none;
+
+    // 1. The canonical unit, in any state (installed, enabled, masked, ...).
+    const SysResult list =
+        runSystemctl({QStringLiteral("list-unit-files"), QStringLiteral("--type=service"),
+                      QStringLiteral("--no-legend"), QStringLiteral("--no-pager")});
+    if (list.exitCode == 0) {
+        const QStringList lines = list.output.split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            const QStringList parts = QString(line).simplified().split(QLatin1Char(' '),
+                                                                      Qt::SkipEmptyParts);
+            if (parts.size() < 2)
+                continue;
+            const QString name = parts.at(0);
+            const QString state = parts.at(1);
+            if (name == QLatin1String(kServiceUnit)) {
+                // Already registered by us (or the user's own copy):
+                // just start it. A disabled copy still needs enabling —
+                // that is the "add the service" step.
+                ServiceInfo info;
+                info.unit = name;
+                info.enableInsteadOfStart =
+                    state.startsWith(QStringLiteral("disabled"))
+                    || state.startsWith(QStringLiteral("masked"))
+                    || state == QLatin1String("bad");
+                return info;
+            }
+        }
+    }
+
+    // 2. Any other user unit that provides the same effect (runs `dsh web`).
+    //    "如果有效果相同的服务就不添加该服务": use it, don't register ours.
+    const QStringList dirs = {
+        userUnitDir(),
+        QStringLiteral("/etc/systemd/user"),
+        QStringLiteral("/usr/lib/systemd/user"),
+        QStringLiteral("/usr/local/lib/systemd/user"),
+    };
+    for (const QString &dirPath : dirs) {
+        const QDir dir(dirPath);
+        const QFileInfoList entries =
+            dir.entryInfoList({QStringLiteral("*.service")}, QDir::Files, QDir::Name);
+        for (const QFileInfo &info : entries) {
+            if (info.fileName() == QLatin1String(kServiceUnit))
+                continue; // already handled above
+            QFile f(info.absoluteFilePath());
+            if (!f.open(QIODevice::ReadOnly))
+                continue;
+            const QString content = QString::fromUtf8(f.readAll());
+            if (content.contains(QStringLiteral("dsh web"))) {
+                ServiceInfo found;
+                found.unit = info.fileName();
+                return found;
+            }
+        }
+    }
+    return none;
+}
+
+int BackendManager::extractServicePort(const QString &unit, int fallback)
+{
+    const SysResult result =
+        runSystemctl({QStringLiteral("show"), QStringLiteral("-p"), QStringLiteral("ExecStart"),
+                      QStringLiteral("-p"), QStringLiteral("Environment"), unit});
+    if (result.exitCode != 0)
+        return fallback;
+
+    // Collect Environment= lines (NAME=value pairs, space separated).
+    QHash<QString, QString> env;
+    static const QRegularExpression envLine(
+        QStringLiteral("^Environment=(.+)$"),
+        QRegularExpression::MultilineOption);
+    auto it = envLine.globalMatch(result.output);
+    while (it.hasNext()) {
+        const QString value = it.next().captured(1);
+        const QStringList pairs = value.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        for (const QString &pair : pairs) {
+            const int eq = pair.indexOf(QLatin1Char('='));
+            if (eq > 0)
+                env.insert(pair.left(eq), pair.mid(eq + 1));
+        }
+    }
+
+    // Find "--port <value>" in the ExecStart argv (systemd show format:
+    // argv[]=/usr/bin/dsh web --host ... --port 3080).
+    static const QRegularExpression portArg(
+        QStringLiteral("--port\\s+([^\\s;]+)"));
+    const QRegularExpressionMatch match = portArg.match(result.output);
+    if (!match.hasMatch())
+        return fallback;
+    const QString value = match.captured(1);
+    bool ok = false;
+    const int port = value.toInt(&ok);
+    if (ok && port > 0 && port < 65536)
+        return port;
+    // ${VAR} expansion form
+    static const QRegularExpression envRef(QStringLiteral("\\$\\{([^}]+)\\}"));
+    const QRegularExpressionMatch ref = envRef.match(value);
+    if (ref.hasMatch()) {
+        const int envPort = env.value(ref.captured(1)).toInt(&ok);
+        if (ok && envPort > 0 && envPort < 65536)
+            return envPort;
+    }
+    return fallback;
+}
+
+bool BackendManager::startServiceUnit(const QString &unit)
+{
+    const SysResult result = runSystemctl({QStringLiteral("start"), unit});
+    return result.exitCode == 0;
+}
+
+bool BackendManager::enableServiceUnit(const QString &unit)
+{
+    const SysResult result =
+        runSystemctl({QStringLiteral("enable"), QStringLiteral("--now"), unit});
+    return result.exitCode == 0;
+}
+
+void BackendManager::tryServiceOrSpawn(int preferredPort)
+{
+    // Guard: never touch systemd when the user opted out.
+    if (noService) {
+        spawnBackend();
+        return;
+    }
+
+    // "如果有效果相同的服务就不添加该服务":
+    // an already-registered equivalent service is only started, never re-added.
+    const ServiceInfo info = detectEquivalentService();
+    if (!info.unit.isEmpty()) {
+        bool ok = false;
+        if (info.enableInsteadOfStart) {
+            emit statusChanged(
+                tr("未发现已启用的等效服务，正在启用 %1 …").arg(info.unit));
+            ok = enableServiceUnit(info.unit);
+            if (ok)
+                emit statusChanged(tr("%1 已启用，等待就绪…").arg(info.unit));
+        } else {
+            emit statusChanged(
+                tr("发现已注册的等效服务 %1，正在启动…").arg(info.unit));
+            ok = startServiceUnit(info.unit);
+            if (ok)
+                emit statusChanged(tr("服务 %1 已启动，等待就绪…").arg(info.unit));
+        }
+        if (!ok) {
+            emit statusChanged(tr("服务 %1 启动/启用失败，回退到直接运行 dsh web…")
+                                   .arg(info.unit));
+            spawnBackend();
+            return;
+        }
+        const int port = extractServicePort(info.unit, preferredPort);
+        const QUrl url(QStringLiteral("http://127.0.0.1:%1/").arg(port));
+        m_pollFallbackToSpawn = true;
+        startPolling(url, kServicePollAttempts);
+        return;
+    }
+
+    // Nothing equivalent found: register ours, if the unit file was shipped.
+    if (unitFileExists(QLatin1String(kServiceUnit))) {
+        emit statusChanged(
+            tr("未发现等效服务，正在注册并启动 %1 …").arg(QLatin1String(kServiceUnit)));
+        if (enableServiceUnit(QLatin1String(kServiceUnit))) {
+            emit statusChanged(tr("%1 已启用，等待就绪…").arg(QLatin1String(kServiceUnit)));
+            m_pollFallbackToSpawn = true;
+            startPolling(QUrl(QStringLiteral("http://127.0.0.1:%1/").arg(preferredPort)),
+                         kServicePollAttempts);
+            return;
+        }
+        emit statusChanged(tr("%1 注册/启动失败，回退到直接运行 dsh web…")
+                               .arg(QLatin1String(kServiceUnit)));
+    }
+
+    spawnBackend();
+}
+
+// --- direct process spawn (fallback) -------------------------------------
+
 void BackendManager::spawnBackend()
 {
     if (m_shuttingDown || m_failed)
         return;
 
-    const QString node = nodeExecutable(nodeOverride);
-    if (node.isEmpty()) {
-        fail(tr("未找到 Node.js，无法启动 Harness 后端。请安装 nodejs 包，或通过 "
-                "DSH_DESKTOP_NODE 指定 node 可执行文件。"));
+    const QString dsh = dshExecutable();
+    if (dsh.isEmpty()) {
+        fail(tr("未找到 dsh 命令。请先安装 deepseek-harness-git（提供 /usr/bin/dsh），"
+                "或将其加入 PATH。"));
         return;
     }
 
-    QString program = node;
-    QStringList arguments;
-    const QString entry = dshEntryIn(m_runtimeDir);
-    if (!entry.isEmpty()) {
-        arguments << entry;
-    } else {
-        const QString dsh = QStandardPaths::findExecutable(QStringLiteral("dsh"));
-        if (dsh.isEmpty()) {
-            fail(tr("未找到捆绑的 Harness 运行时，PATH 中也没有 dsh 命令。"));
-            return;
-        }
-        arguments << dsh;
-    }
-    arguments << QStringLiteral("web") << QStringLiteral("--host") << QStringLiteral("127.0.0.1")
-              << QStringLiteral("--port") << QStringLiteral("0");
-
     m_spawned = true;
     m_pendingBuffer.clear();
-    emit statusChanged(tr("正在启动 DeepSeek Harness 后端…"));
+    emit statusChanged(tr("正在启动 DeepSeek Harness 后端 (dsh web)…"));
 
     m_process = new QProcess(this);
     connect(m_process, &QProcess::readyReadStandardOutput, this,
@@ -205,8 +393,10 @@ void BackendManager::spawnBackend()
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     m_process->setWorkingDirectory(QDir::homePath());
     m_process->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
-    m_process->setProgram(program);
-    m_process->setArguments(arguments);
+    m_process->setProgram(dsh);
+    m_process->setArguments({QStringLiteral("web"), QStringLiteral("--host"),
+                             QStringLiteral("127.0.0.1"), QStringLiteral("--port"),
+                             QStringLiteral("0")});
     m_process->start();
 
     QTimer::singleShot(kUrlLineTimeoutMs, this, [this] {
@@ -259,6 +449,8 @@ void BackendManager::onProcessErrorOccurred(QProcess::ProcessError error)
     }
 }
 
+// --- readiness polling ----------------------------------------------------
+
 void BackendManager::startPolling(const QUrl &url, int maxAttempts)
 {
     m_url = url;
@@ -275,6 +467,13 @@ void BackendManager::pollTick()
         return;
     ++m_pollAttempts;
     if (m_pollAttempts > m_maxPollAttempts) {
+        if (m_pollFallbackToSpawn) {
+            // The service did not come up in time; degrade to a direct spawn.
+            m_pollFallbackToSpawn = false;
+            m_pollTimer.stop();
+            spawnBackend();
+            return;
+        }
         fail(tr("等待 Harness 服务就绪超时 (%1)。日志: %2")
                  .arg(m_url.toString(), backendLogPath()));
         return;
