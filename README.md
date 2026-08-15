@@ -7,7 +7,7 @@ native window — no browser needed.
 ## Architecture
 
 The wrapper does **not** bundle the harness. It requires the `dsh` command on
-`PATH` — on Arch, install the AUR package `deepseek-harness-git` (a dependency
+`PATH` — on Arch, install the AUR package `deepseek-harness-bin` (a dependency
 of the `deepseek-harness-bin-desktop` package).
 
 Backend selection order on startup:
