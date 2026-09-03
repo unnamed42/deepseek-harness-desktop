@@ -7,7 +7,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h
 Environment=DSH_WEB_PORT=3080
-ExecStart=/usr/bin/dsh web --host 127.0.0.1 --port ${DSH_WEB_PORT}
+ExecStart=/usr/bin/dsh web --host 127.0.0.1 --port ${DSH_WEB_PORT} --no-open
 Restart=on-failure
 RestartSec=3
 
