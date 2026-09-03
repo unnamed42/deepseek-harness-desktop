@@ -1,14 +1,19 @@
-pkgbase = deepseek-harness-bin-desktop
-	pkgdesc = Desktop wrapper (Qt6 WebEngine) for the DeepSeek Harness browser UI - uses the deepseek-harness-bin dsh backend via a systemd user service, no browser needed
+pkgbase = deepseek-harness-desktop
+	pkgdesc = Desktop Qt6 (WebEngine) wrapper for the DeepSeek Harness Web GUI, built from source
 	pkgver = 0.2.0
-	pkgrel = 2
-	url = https://github.com/PlayerSZY/deepseek-harness-desktop
+	pkgrel = 1
+	url = https://github.com/unnamed42/deepseek-harness-desktop
 	arch = x86_64
 	license = MIT
+	makedepends = cmake
+	makedepends = ninja
+	makedepends = qt6-declarative
 	depends = qt6-webengine
-	depends = deepseek-harness-bin
+	depends = deepseek-harness-git
 	depends = hicolor-icon-theme
-	source = https://github.com/PlayerSZY/deepseek-harness-desktop/releases/download/v0.2.0/deepseek-harness-bin-desktop-0.2.0-x86_64.tar.zst
-	sha256sums = a741783d98719239d3d67b9d410c57e4cfd82781b46a979189699dd7b8386f0f
+	provides = deepseek-harness-desktop
+	conflicts = deepseek-harness-bin-desktop
+	source = deepseek-harness-desktop::git+https://github.com/unnamed42/deepseek-harness-desktop.git#commit=d214a4f96fae3fde2a17ad6e56d975f85ace0cbf
+	sha256sums = SKIP
 
-pkgname = deepseek-harness-bin-desktop
+pkgname = deepseek-harness-desktop
