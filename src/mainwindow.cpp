@@ -21,8 +21,22 @@
 
 namespace {
 
-// Page that routes popup windows (target=_blank / window.open) for external
-// hosts to the system browser instead of opening a new webview window.
+inline bool isWebScheme(const QUrl &url)
+{
+    return url.scheme() == QLatin1String("http")
+        || url.scheme() == QLatin1String("https");
+}
+
+inline bool isExternalUrl(const QUrl &url, const QUrl &backendBase)
+{
+    if (!isWebScheme(url) || url.isEmpty())
+        return false;
+    return url.host() != backendBase.host()
+        || (url.port(-1) != backendBase.port(-1) && url.port(-1) != -1);
+}
+
+// Page that routes popup windows (target=_blank / window.open) and ordinary
+// external links to the system browser instead of navigating inside the shell.
 class AppWebPage : public QWebEnginePage
 {
 public:
@@ -30,24 +44,35 @@ public:
     QUrl backendBase;
 
 protected:
+    bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override
+    {
+        // Clicking an external link inside the current page: hand it to the
+        // system browser and refuse to navigate away from the app.
+        if (isMainFrame && type == NavigationTypeLinkClicked
+            && isExternalUrl(url, backendBase)) {
+            QDesktopServices::openUrl(url);
+            return false;
+        }
+        return QWebEnginePage::acceptNavigationRequest(url, type, isMainFrame);
+    }
+
     QWebEnginePage *createWindow(WebWindowType type) override
     {
         Q_UNUSED(type);
-        // Route popup windows for external hosts to the system browser.
-        auto *view = new QWebEngineView;
-        view->setAttribute(Qt::WA_DeleteOnClose);
-        connect(view, &QWebEngineView::urlChanged, this, [view, this](const QUrl &url) {
-            const bool webScheme = url.scheme() == QLatin1String("http")
-                || url.scheme() == QLatin1String("https");
-            if (webScheme && !url.isEmpty()) {
-                const bool external = url.host() != backendBase.host()
-                    || (url.port(-1) != backendBase.port(-1) && url.port(-1) != -1);
-                if (external)
-                    QDesktopServices::openUrl(url);
-            }
-            view->close();
+        // Route popup windows (target=_blank / window.open) to the system
+        // browser. The returned page must share THIS page's profile: creating
+        // a fresh QWebEngineView would come with its own off-the-record
+        // profile and Chromium then fails to adopt the new window's content
+        // ("Can not adopt content from a different WebEngineProfile").
+        // So we return a throwaway page of the same profile that forwards the
+        // first real URL and then destroys itself.
+        auto *page = new QWebEnginePage(profile(), this);
+        connect(page, &QWebEnginePage::urlChanged, page, [page](const QUrl &url) {
+            if (isWebScheme(url) && !url.isEmpty())
+                QDesktopServices::openUrl(url);
+            page->deleteLater();
         });
-        return view->page();
+        return page;
     }
 };
 
