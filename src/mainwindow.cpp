@@ -83,7 +83,8 @@ MainWindow::MainWindow(BackendManager *backend, QWidget *parent)
     , m_backend(backend)
 {
     setWindowTitle(tr("DeepSeek Harness"));
-    setWindowIcon(QIcon(QStringLiteral(":/icons/app-256.png")));
+    auto windowIcon = QIcon::fromTheme("deepseek-harness-desktop", QIcon(QStringLiteral(":/icons/app-256.png")));
+    setWindowIcon(windowIcon);
     setMinimumSize(860, 600);
     resize(1280, 860);
 
@@ -110,8 +111,8 @@ void MainWindow::buildSplash()
     layout->setContentsMargins(48, 48, 48, 48);
 
     auto *icon = new QLabel(splash);
-    icon->setPixmap(QPixmap(QStringLiteral(":/icons/app-256.png"))
-                        .scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    auto windowIcon = QIcon::fromTheme("deepseek-harness-desktop", QIcon(QStringLiteral(":/icons/app-256.png")));
+    icon->setPixmap(windowIcon.pixmap(QSize(128, 128)));
     icon->setAlignment(Qt::AlignCenter);
     layout->addWidget(icon);
 
