@@ -57,7 +57,10 @@ private:
     void spawnBackend();
     void tryServiceOrSpawn(int preferredPort);
     ServiceInfo detectEquivalentService();
-    int extractServicePort(const QString &unit, int fallback);
+    QUrl readServiceUrl(const QString &unit);
+    void startServiceUrlPolling(const QString &unit);
+    void pollServiceUrl();
+    QString sanitizeUrl(const QUrl &url) const;
     bool unitFileExists(const QString &name);
     bool startServiceUnit(const QString &unit);
     bool enableServiceUnit(const QString &unit);
@@ -68,6 +71,10 @@ private:
     QProcess *m_process = nullptr;
     QNetworkAccessManager m_nam;
     QTimer m_pollTimer;
+    QTimer m_serviceUrlTimer;
+    QString m_serviceUnit;
+    int m_serviceUrlAttempts = 0;
+    int m_serviceUrlMaxAttempts = 0;
     QUrl m_url;
     int m_pollAttempts = 0;
     int m_maxPollAttempts = 0;

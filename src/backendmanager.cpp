@@ -20,6 +20,8 @@ constexpr int kReadyPollAttempts = 300;  // ~90 s while a spawned backend boots
 constexpr int kServicePollAttempts = 200; // ~60 s for a systemd-managed backend
 constexpr int kDirectPollAttempts = 1200; // ~6 min for a user-managed URL
 constexpr int kSystemctlTimeoutMs = 30000;
+constexpr int kServiceUrlPollIntervalMs = 500; // journal/journalctl poll interval
+constexpr int kServiceUrlPollAttempts = 120;  // ~60 s waiting for the URL line
 
 const char *kProbeExisting = "probe-existing";
 const char *kReadyPoll = "ready-poll";
@@ -31,12 +33,11 @@ struct SysResult
     QString output;
 };
 
-SysResult runSystemctl(const QStringList &arguments)
+SysResult runCommand(const QString &program, const QStringList &arguments)
 {
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
-    process.start(QStringLiteral("systemctl"),
-                  QStringList{QStringLiteral("--user")} + arguments);
+    process.start(program, arguments);
     if (!process.waitForStarted(3000))
         return {};
     if (!process.waitForFinished(kSystemctlTimeoutMs)) {
@@ -45,6 +46,27 @@ SysResult runSystemctl(const QStringList &arguments)
         return {};
     }
     return {process.exitCode(), QString::fromUtf8(process.readAllStandardOutput())};
+}
+
+SysResult runSystemctl(const QStringList &arguments)
+{
+    return runCommand(QStringLiteral("systemctl"),
+                      QStringList{QStringLiteral("--user")} + arguments);
+}
+
+// Parse the first "dsh web: <url>" line in the given text. `dsh web` prints
+// the reachable URL (now carrying an auth token, e.g.
+// "dsh web: http://127.0.0.1:3080/?token=...") to its logs on startup; that is
+// the ONLY place the token is exposed, so it must come from the logs rather
+// than from the unit file. The caller passes reverse-chronological text so the
+// first match is the newest boot's URL.
+QUrl parseHarnessUrl(const QString &text)
+{
+    static const QRegularExpression re(QStringLiteral("dsh web:\\s*(https?://\\S+)"));
+    const QRegularExpressionMatch match = re.match(text);
+    if (match.hasMatch())
+        return QUrl(match.captured(1));
+    return {};
 }
 
 QString dshExecutable()
@@ -105,7 +127,7 @@ void BackendManager::start()
 
     if (!directUrl.isEmpty()) {
         m_url = QUrl::fromUserInput(directUrl);
-        emit statusChanged(tr("正在连接 %1 …").arg(m_url.toString()));
+        emit statusChanged(tr("正在连接 %1 …").arg(sanitizeUrl(m_url)));
         startPolling(m_url, kDirectPollAttempts);
         return;
     }
@@ -151,7 +173,7 @@ void BackendManager::onProbeFinished(QNetworkReply *reply)
                 m_url = reply->url();
                 m_spawned = false;
                 m_ready = true;
-                emit statusChanged(tr("已连接到本地 Harness 服务: %1").arg(m_url.toString()));
+                emit statusChanged(tr("已连接到本地 Harness 服务: %1").arg(sanitizeUrl(m_url)));
                 emit backendReady(m_url);
                 return;
             }
@@ -165,7 +187,7 @@ void BackendManager::onProbeFinished(QNetworkReply *reply)
         if (reply->error() == QNetworkReply::NoError && status == 200) {
             m_ready = true;
             m_pollTimer.stop();
-            emit statusChanged(tr("Harness 服务已就绪: %1").arg(m_url.toString()));
+            emit statusChanged(tr("Harness 服务已就绪: %1").arg(sanitizeUrl(m_url)));
             emit backendReady(m_url);
         }
         // otherwise the poll timer keeps going
@@ -250,51 +272,80 @@ BackendManager::ServiceInfo BackendManager::detectEquivalentService()
     return none;
 }
 
-int BackendManager::extractServicePort(const QString &unit, int fallback)
+QString BackendManager::sanitizeUrl(const QUrl &url) const
 {
-    const SysResult result =
-        runSystemctl({QStringLiteral("show"), QStringLiteral("-p"), QStringLiteral("ExecStart"),
-                      QStringLiteral("-p"), QStringLiteral("Environment"), unit});
-    if (result.exitCode != 0)
-        return fallback;
+    if (!url.hasQuery())
+        return url.toString();
+    // Don't print the auth token in status messages / logs.
+    QString masked = url.toString(QUrl::RemoveQuery);
+    masked += QLatin1String("?token=***");
+    return masked;
+}
 
-    // Collect Environment= lines (NAME=value pairs, space separated).
-    QHash<QString, QString> env;
-    static const QRegularExpression envLine(
-        QStringLiteral("^Environment=(.+)$"),
-        QRegularExpression::MultilineOption);
-    auto it = envLine.globalMatch(result.output);
-    while (it.hasNext()) {
-        const QString value = it.next().captured(1);
-        const QStringList pairs = value.split(QLatin1Char(' '), Qt::SkipEmptyParts);
-        for (const QString &pair : pairs) {
-            const int eq = pair.indexOf(QLatin1Char('='));
-            if (eq > 0)
-                env.insert(pair.left(eq), pair.mid(eq + 1));
-        }
+QUrl BackendManager::readServiceUrl(const QString &unit)
+{
+    // The auth token (part of the full reachable URL) is only printed by
+    // `dsh web` on startup and is NOWHERE in the unit file, so resolve the
+    // URL from the service's own logs instead of parsing the ExecStart.
+    // 1. journalctl -r: new entries FIRST, so the first `dsh web:` URL match
+    //    is the newest boot's (with the current auth token).
+    const SysResult journal = runCommand(
+        QStringLiteral("journalctl"),
+        {QStringLiteral("--user"), QStringLiteral("-u"), unit,
+         QStringLiteral("-r"), QStringLiteral("--no-pager"),
+         QStringLiteral("-o"), QStringLiteral("cat")});
+    if (journal.exitCode == 0) {
+        const QUrl url = parseHarnessUrl(journal.output);
+        if (!url.isEmpty())
+            return url;
     }
+    // 2. systemctl --user status: recent log lines carried alongside status.
+    const SysResult status = runSystemctl({QStringLiteral("status"), unit});
+    if (status.exitCode == 0) {
+        const QUrl url = parseHarnessUrl(status.output);
+        if (!url.isEmpty())
+            return url;
+    }
+    return {};
+}
 
-    // Find "--port <value>" in the ExecStart argv (systemd show format:
-    // argv[]=/usr/bin/dsh web --host ... --port 3080).
-    static const QRegularExpression portArg(
-        QStringLiteral("--port\\s+([^\\s;]+)"));
-    const QRegularExpressionMatch match = portArg.match(result.output);
-    if (!match.hasMatch())
-        return fallback;
-    const QString value = match.captured(1);
-    bool ok = false;
-    const int port = value.toInt(&ok);
-    if (ok && port > 0 && port < 65536)
-        return port;
-    // ${VAR} expansion form
-    static const QRegularExpression envRef(QStringLiteral("\\$\\{([^}]+)\\}"));
-    const QRegularExpressionMatch ref = envRef.match(value);
-    if (ref.hasMatch()) {
-        const int envPort = env.value(ref.captured(1)).toInt(&ok);
-        if (ok && envPort > 0 && envPort < 65536)
-            return envPort;
+void BackendManager::startServiceUrlPolling(const QString &unit)
+{
+    m_serviceUnit = unit;
+    m_serviceUrlAttempts = 0;
+    m_serviceUrlMaxAttempts = kServiceUrlPollAttempts;
+    connect(&m_serviceUrlTimer, &QTimer::timeout, this, &BackendManager::pollServiceUrl);
+    m_serviceUrlTimer.start(kServiceUrlPollIntervalMs);
+    pollServiceUrl();
+}
+
+void BackendManager::pollServiceUrl()
+{
+    if (m_shuttingDown || m_ready || m_failed)
+        return;
+    ++m_serviceUrlAttempts;
+    const QUrl url = readServiceUrl(m_serviceUnit);
+    if (!url.isEmpty()) {
+        m_serviceUrlTimer.stop();
+        emit statusChanged(tr("服务 %1 监听于 %2，等待就绪…")
+                               .arg(m_serviceUnit, sanitizeUrl(url)));
+        m_pollFallbackToSpawn = true;
+        startPolling(url, kServicePollAttempts);
+        return;
     }
-    return fallback;
+    if (m_serviceUrlAttempts > m_serviceUrlMaxAttempts) {
+        m_serviceUrlTimer.stop();
+        emit statusChanged(
+            tr("从服务 %1 的日志中未解析出监听 URL，回退到直接运行 dsh web…")
+                .arg(m_serviceUnit));
+        spawnBackend();
+        return;
+    }
+    if (m_serviceUrlAttempts % 10 == 1) {
+        emit statusChanged(tr("等待服务 %1 输出监听 URL (%2s)…")
+                               .arg(m_serviceUnit)
+                               .arg((m_serviceUrlAttempts * kServiceUrlPollIntervalMs) / 1000));
+    }
 }
 
 bool BackendManager::startServiceUnit(const QString &unit)
@@ -312,6 +363,7 @@ bool BackendManager::enableServiceUnit(const QString &unit)
 
 void BackendManager::tryServiceOrSpawn(int preferredPort)
 {
+    Q_UNUSED(preferredPort);
     // Guard: never touch systemd when the user opted out.
     if (noService) {
         spawnBackend();
@@ -342,10 +394,8 @@ void BackendManager::tryServiceOrSpawn(int preferredPort)
             spawnBackend();
             return;
         }
-        const int port = extractServicePort(info.unit, preferredPort);
-        const QUrl url(QStringLiteral("http://127.0.0.1:%1/").arg(port));
-        m_pollFallbackToSpawn = true;
-        startPolling(url, kServicePollAttempts);
+        // Resolve the reachable URL (port + auth token) from the service logs.
+        startServiceUrlPolling(info.unit);
         return;
     }
 
@@ -355,9 +405,8 @@ void BackendManager::tryServiceOrSpawn(int preferredPort)
             tr("未发现等效服务，正在注册并启动 %1 …").arg(QLatin1String(kServiceUnit)));
         if (enableServiceUnit(QLatin1String(kServiceUnit))) {
             emit statusChanged(tr("%1 已启用，等待就绪…").arg(QLatin1String(kServiceUnit)));
-            m_pollFallbackToSpawn = true;
-            startPolling(QUrl(QStringLiteral("http://127.0.0.1:%1/").arg(preferredPort)),
-                         kServicePollAttempts);
+            // Resolve the reachable URL (port + auth token) from the service logs.
+            startServiceUrlPolling(QLatin1String(kServiceUnit));
             return;
         }
         emit statusChanged(tr("%1 注册/启动失败，回退到直接运行 dsh web…")
@@ -418,12 +467,14 @@ void BackendManager::onProcessReadyRead()
     if (m_ready)
         return;
     m_pendingBuffer += QString::fromUtf8(chunk);
-    static const QRegularExpression re(
-        QStringLiteral("dsh web:\\s*(http://127\\.0\\.0\\.1:\\d+)"));
+    // dsh web prints "dsh web: <full url>"; since 0.1.2rc the URL carries an
+    // auth token query param (e.g. http://127.0.0.1:3080/?token=...), which is
+    // only available on this line, so capture the whole URL — not just the port.
+    static const QRegularExpression re(QStringLiteral("dsh web:\\s*(https?://\\S+)"));
     const QRegularExpressionMatch match = re.match(m_pendingBuffer);
     if (match.hasMatch()) {
         m_url = QUrl(match.captured(1));
-        emit statusChanged(tr("后端监听于 %1，等待就绪…").arg(m_url.toString()));
+        emit statusChanged(tr("后端监听于 %1，等待就绪…").arg(sanitizeUrl(m_url)));
         startPolling(m_url, kReadyPollAttempts);
     }
     if (m_pendingBuffer.size() > (1 << 20))
@@ -475,7 +526,7 @@ void BackendManager::pollTick()
             return;
         }
         fail(tr("等待 Harness 服务就绪超时 (%1)。日志: %2")
-                 .arg(m_url.toString(), backendLogPath()));
+                 .arg(sanitizeUrl(m_url), backendLogPath()));
         return;
     }
     if (m_pollAttempts % 10 == 1) {
