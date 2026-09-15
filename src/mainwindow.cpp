@@ -18,6 +18,7 @@
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineView>
+#include <QWebEngineNavigationRequest>
 
 namespace {
 
@@ -48,8 +49,7 @@ protected:
     {
         // Clicking an external link inside the current page: hand it to the
         // system browser and refuse to navigate away from the app.
-        if (isMainFrame && type == NavigationTypeLinkClicked
-            && isExternalUrl(url, backendBase)) {
+        if (type == NavigationTypeLinkClicked && isExternalUrl(url, backendBase)) {
             QDesktopServices::openUrl(url);
             return false;
         }
@@ -67,9 +67,11 @@ protected:
         // So we return a throwaway page of the same profile that forwards the
         // first real URL and then destroys itself.
         auto *page = new QWebEnginePage(profile(), this);
-        connect(page, &QWebEnginePage::urlChanged, page, [page](const QUrl &url) {
+        connect(page, &QWebEnginePage::navigationRequested, page, [page](QWebEngineNavigationRequest &request) {
+            auto url = request.url();
             if (isWebScheme(url) && !url.isEmpty())
                 QDesktopServices::openUrl(url);
+            request.reject();
             page->deleteLater();
         });
         return page;
