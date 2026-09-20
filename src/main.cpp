@@ -4,6 +4,7 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QSocketNotifier>
+#include <SingleApplication>
 
 #include <csignal>
 #include <unistd.h>
@@ -40,12 +41,15 @@ int main(int argc, char *argv[])
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
     QApplication app(argc, argv);
+    SingleApplication single(argc, argv);
+
     QApplication::setApplicationName(QStringLiteral("deepseek-harness-desktop"));
     QApplication::setApplicationDisplayName(QStringLiteral("DeepSeek Harness"));
     QApplication::setOrganizationName(QStringLiteral("deepseek"));
     QApplication::setOrganizationDomain(QStringLiteral("deepseek.com"));
     QApplication::setApplicationVersion(QStringLiteral(DSH_DESKTOP_VERSION));
     QGuiApplication::setDesktopFileName(QStringLiteral("deepseek-harness-desktop"));
+    QGuiApplication::setQuitOnLastWindowClosed(true);
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/app-256.png")));
 
     if (::geteuid() == 0) {
@@ -92,6 +96,9 @@ int main(int argc, char *argv[])
     QSocketNotifier signalNotifier(g_signalPipe[0], QSocketNotifier::Read);
     QObject::connect(&signalNotifier, &QSocketNotifier::activated, &app,
                      &QCoreApplication::quit);
+
+    QObject::connect(&single, &SingleApplication::instanceStarted,
+            &window, &MainWindow::focusWindow);
 
     window.show();
     backend.start();

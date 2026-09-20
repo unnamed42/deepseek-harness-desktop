@@ -19,6 +19,12 @@
 #include <QWebEngineProfile>
 #include <QWebEngineView>
 #include <QWebEngineNavigationRequest>
+#include <QWebEnginePermission>
+#include <QWebEngineNotification>
+#include <QSystemTrayIcon>
+#include <QMenu>
+#include <QAction>
+#include <memory>
 
 namespace {
 
@@ -34,6 +40,10 @@ inline bool isExternalUrl(const QUrl &url, const QUrl &backendBase)
         return false;
     return url.host() != backendBase.host()
         || (url.port(-1) != backendBase.port(-1) && url.port(-1) != -1);
+}
+
+inline QIcon deepseekIcon(int size = 256) {
+    return QIcon::fromTheme("deepseek-harness-desktop", QIcon(QString(":/icons/app-%1.png").arg(size)));
 }
 
 // Page that routes popup windows (target=_blank / window.open) and ordinary
@@ -85,10 +95,36 @@ MainWindow::MainWindow(BackendManager *backend, QWidget *parent)
     , m_backend(backend)
 {
     setWindowTitle(tr("DeepSeek Harness"));
-    auto windowIcon = QIcon::fromTheme("deepseek-harness-desktop", QIcon(QStringLiteral(":/icons/app-256.png")));
+    auto windowIcon = deepseekIcon(64);
     setWindowIcon(windowIcon);
     setMinimumSize(860, 600);
     resize(1280, 860);
+
+    // setup system tray
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        m_trayIcon = new QSystemTrayIcon(this);
+        m_trayIcon->setIcon(windowIcon);
+        m_trayIcon->setToolTip(tr("Deepseek Harness 桌面版"));
+
+        auto menu = new QMenu(this);
+        auto quitAction = new QAction(tr("退出"));
+        auto showAction = new QAction(tr("显示"));
+        menu->addAction(showAction);
+        menu->addSeparator();
+        menu->addAction(quitAction);
+        m_trayIcon->setContextMenu(menu);
+
+        connect(qApp, &QCoreApplication::aboutToQuit, m_trayIcon, &QSystemTrayIcon::hide);
+        connect(quitAction, &QAction::triggered, qApp, &QCoreApplication::quit);
+        connect(showAction, &QAction::triggered, this, &MainWindow::focusWindow);
+        connect(m_trayIcon, &QSystemTrayIcon::messageClicked, this, &MainWindow::focusWindow);
+        connect(m_trayIcon, &QSystemTrayIcon::activated, [this](QSystemTrayIcon::ActivationReason reason) {
+            if(reason == QSystemTrayIcon::Trigger)
+                focusWindow();
+        });
+
+        m_trayIcon->show();
+    }
 
     m_stack = new QStackedWidget(this);
     setCentralWidget(m_stack);
@@ -113,7 +149,7 @@ void MainWindow::buildSplash()
     layout->setContentsMargins(48, 48, 48, 48);
 
     auto *icon = new QLabel(splash);
-    auto windowIcon = QIcon::fromTheme("deepseek-harness-desktop", QIcon(QStringLiteral(":/icons/app-256.png")));
+    auto windowIcon = deepseekIcon();
     icon->setPixmap(windowIcon.pixmap(QSize(128, 128)));
     icon->setAlignment(Qt::AlignCenter);
     layout->addWidget(icon);
@@ -240,6 +276,14 @@ void MainWindow::buildWebView()
     m_webView->setPage(page);
     connect(m_webView, &QWebEngineView::loadProgress, this, &MainWindow::onLoadProgress);
     connect(m_webView, &QWebEngineView::loadFinished, this, &MainWindow::onLoadFinished);
+    // allow desktop notifications
+    connect(page, &QWebEnginePage::permissionRequested, [](QWebEnginePermission permission) {
+        if (permission.permissionType() == QWebEnginePermission::PermissionType::Notifications)
+            permission.grant();
+    });
+    m_profile->setNotificationPresenter([this](std::unique_ptr<QWebEngineNotification> notification) {
+        showNotification(notification.get());
+    });
 
     m_stack->addWidget(m_webView);
 }
@@ -312,4 +356,25 @@ void MainWindow::restoreWindowState()
     const QByteArray geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
     if (!geometry.isEmpty())
         restoreGeometry(geometry);
+}
+
+void MainWindow::showNotification(QWebEngineNotification *notification) {
+    if(!m_trayIcon)
+        return;
+    auto iconImage = notification->icon();
+    m_trayIcon->showMessage(
+        notification->title(),
+        notification->message(),
+        iconImage.isNull() ? deepseekIcon(128) : QPixmap::fromImage(iconImage),
+        5000
+    );
+}
+
+void MainWindow::focusWindow() {
+    if (isHidden() || isMinimized()) {
+        setWindowState(windowState() & ~Qt::WindowMinimized | Qt::WindowActive);
+        show();
+    }
+    raise();
+    activateWindow();
 }

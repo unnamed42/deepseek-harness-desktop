@@ -11,6 +11,8 @@ class QPushButton;
 class QStackedWidget;
 class QWebEngineProfile;
 class QWebEngineView;
+class QWebEngineNotification;
+class QSystemTrayIcon;
 
 class MainWindow : public QMainWindow
 {
@@ -29,6 +31,8 @@ private slots:
     void onLoadProgress(int progress);
     void onLoadFinished(bool ok);
     void retryLoad();
+public slots:
+    void focusWindow();
 
 private:
     void buildSplash();
@@ -37,6 +41,7 @@ private:
     void saveWindowState();
     void restoreWindowState();
     void addShortcuts();
+    void showNotification(QWebEngineNotification *notification);
 
     BackendManager *m_backend = nullptr;
     QStackedWidget *m_stack = nullptr;
@@ -46,6 +51,7 @@ private:
     QProgressBar *m_splashProgress = nullptr;
     QWebEngineView *m_webView = nullptr;
     QWebEngineProfile *m_profile = nullptr;
+    QSystemTrayIcon *m_trayIcon = nullptr;
     QUrl m_url;
     int m_reloadAttempts = 0;
 };
