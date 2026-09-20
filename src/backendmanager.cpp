@@ -291,8 +291,9 @@ QUrl BackendManager::readServiceUrl(const QString &unit)
     //    is the newest boot's (with the current auth token).
     const SysResult journal = runCommand(
         QStringLiteral("journalctl"),
-        {QStringLiteral("--user"), QStringLiteral("-u"), unit,
-         QStringLiteral("-r"), QStringLiteral("--no-pager"),
+        {QStringLiteral("--user"), QStringLiteral("-Iru"), unit,
+            QStringLiteral("-g"), QStringLiteral("http"),
+         QStringLiteral("--no-pager"),
          QStringLiteral("-o"), QStringLiteral("cat")});
     if (journal.exitCode == 0) {
         const QUrl url = parseHarnessUrl(journal.output);
