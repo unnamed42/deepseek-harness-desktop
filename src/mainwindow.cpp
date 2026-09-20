@@ -344,6 +344,18 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+void MainWindow::changeEvent(QEvent *event)
+{
+    if(m_webView && event->type() == QEvent::WindowStateChange)
+    {
+        if(isMinimized() || isHidden())
+            m_webView->page()->setVisible(false);
+        else
+            m_webView->page()->setVisible(true);
+    }
+    QMainWindow::changeEvent(event);
+}
+
 void MainWindow::saveWindowState()
 {
     QSettings settings;
@@ -358,7 +370,8 @@ void MainWindow::restoreWindowState()
         restoreGeometry(geometry);
 }
 
-void MainWindow::showNotification(QWebEngineNotification *notification) {
+void MainWindow::showNotification(QWebEngineNotification *notification)
+{
     if(!m_trayIcon)
         return;
     auto iconImage = notification->icon();
@@ -370,7 +383,8 @@ void MainWindow::showNotification(QWebEngineNotification *notification) {
     );
 }
 
-void MainWindow::focusWindow() {
+void MainWindow::focusWindow()
+{
     if (isHidden() || isMinimized()) {
         setWindowState(windowState() & ~Qt::WindowMinimized | Qt::WindowActive);
         show();
