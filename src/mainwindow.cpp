@@ -24,6 +24,14 @@
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QAction>
+
+#ifdef __linux__
+#include <QDBusMessage>
+#include <QDBusConnection>
+#include <QList>
+#include <QVariant>
+#endif
+
 #include <memory>
 
 namespace {
@@ -55,16 +63,6 @@ public:
     QUrl backendBase;
 
 protected:
-    bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override
-    {
-        // Clicking an external link inside the current page: hand it to the
-        // system browser and refuse to navigate away from the app.
-        if (type == NavigationTypeLinkClicked && isExternalUrl(url, backendBase)) {
-            QDesktopServices::openUrl(url);
-            return false;
-        }
-        return QWebEnginePage::acceptNavigationRequest(url, type, isMainFrame);
-    }
 
     QWebEnginePage *createWindow(WebWindowType type) override
     {
@@ -125,6 +123,34 @@ MainWindow::MainWindow(BackendManager *backend, QWidget *parent)
 
         m_trayIcon->show();
     }
+
+#ifdef __linux__
+    // setup linux specific desktop notification
+    QDBusConnection::sessionBus().connect(
+        "",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "ActionInvoked",
+        this,
+        SLOT(onActionInvoked(uint, QString))
+    );
+    QDBusConnection::sessionBus().connect(
+        "",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "ActivationToken",
+        this,
+        SLOT(onActivationToken(uint, QString))
+    );
+    QDBusConnection::sessionBus().connect(
+        "",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "NotificationClosed",
+        this,
+        SLOT(onNotificationClosed(uint, uint))
+    );
+#endif
 
     m_stack = new QStackedWidget(this);
     setCentralWidget(m_stack);
@@ -372,6 +398,7 @@ void MainWindow::restoreWindowState()
 
 void MainWindow::showNotification(QWebEngineNotification *notification)
 {
+#ifndef __linux__
     if(!m_trayIcon)
         return;
     auto iconImage = notification->icon();
@@ -381,6 +408,48 @@ void MainWindow::showNotification(QWebEngineNotification *notification)
         iconImage.isNull() ? deepseekIcon(128) : QPixmap::fromImage(iconImage),
         5000
     );
+#else
+    auto msg = QDBusMessage::createMethodCall(
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify"
+    );
+
+    QList<QVariant> args;
+    args.append("Deepseek Harness Desktop"); // app name
+    args.append(uint(0)); // replaces_id
+    args.append("deepseek-harness-desktop"); // app icon
+    args.append(notification->title()); // summary
+    args.append(notification->message()); // body
+    args.append(QStringList({"default", tr("打开")})); // actions
+    args.append(QVariantMap()); // hints (empty)
+    args.append(int(-1)); // default timeout
+
+    msg.setArguments(args);
+
+    auto reply = QDBusConnection::sessionBus().call(msg);
+    if(reply.type() == QDBusMessage::ErrorMessage)
+        qDebug() << "QDBus error sending notification:" << reply.errorMessage();
+#endif
+}
+
+void MainWindow::onActivationToken(uint id, const QString &token)
+{
+    m_activationTokens[id] = token;
+}
+
+void MainWindow::onActionInvoked(uint id, const QString &actionKey)
+{
+    QString token = m_activationTokens.take(id);
+    if (!token.isEmpty())
+        qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
+    focusWindow();
+}
+
+void MainWindow::onNotificationClosed(uint id, uint reason)
+{
+    m_activationTokens.remove(id);
 }
 
 void MainWindow::focusWindow()

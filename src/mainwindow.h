@@ -3,6 +3,7 @@
 
 #include <QMainWindow>
 #include <QUrl>
+#include <QMap>
 
 class BackendManager;
 class QLabel;
@@ -32,6 +33,9 @@ private slots:
     void onLoadProgress(int progress);
     void onLoadFinished(bool ok);
     void retryLoad();
+    void onActionInvoked(uint, const QString &);
+    void onActivationToken(uint, const QString &);
+    void onNotificationClosed(uint, uint);
 public slots:
     void focusWindow();
 
@@ -55,4 +59,5 @@ private:
     QSystemTrayIcon *m_trayIcon = nullptr;
     QUrl m_url;
     int m_reloadAttempts = 0;
+    QMap<uint, QString> m_activationTokens;
 };

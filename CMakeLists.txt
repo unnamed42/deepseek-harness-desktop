@@ -1,12 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 project(deepseek-harness-desktop VERSION 0.2.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network WebEngineWidgets)
+if(CMAKEW_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Qt6 6.5 REQUIRED COMPONENTS DBus)
+endif()
 
 set(QT_DEFAULT_MAJOR_VERSION 6 CACHE STRING "Qt version to use, defaults to 6")
 
@@ -43,6 +46,7 @@ target_link_libraries(deepseek-harness-desktop PRIVATE
     Qt6::Widgets
     Qt6::Network
     Qt6::WebEngineWidgets
+    $<$<PLATFORM_ID:Linux>:Qt6::DBus>
 
     SingleApplication::SingleApplication
 )
